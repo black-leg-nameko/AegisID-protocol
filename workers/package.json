@@ -1,0 +1,20 @@
+{
+  "name": "aegisid-workers",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "echo \"No type checking configured for JS runtime\""
+  },
+  "dependencies": {
+    "hono": "^4.6.7",
+    "jose": "^5.9.3"
+  },
+  "devDependencies": {
+    "wrangler": "^3.92.0"
+  }
+}
+
+
