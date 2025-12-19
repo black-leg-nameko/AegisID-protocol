@@ -4,11 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "oidc-provider": "^8.4.2",
     "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.4"
   }
 }
 

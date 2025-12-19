@@ -6,14 +6,21 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "echo \"No type checking configured for JS runtime\""
+    "check": "echo \"No type checking configured for JS runtime\"",
+    "test": "vitest run"
   },
   "dependencies": {
     "hono": "^4.6.7",
     "jose": "^5.9.3"
   },
   "devDependencies": {
-    "wrangler": "^3.92.0"
+    "wrangler": "^3.92.0",
+    "vitest": "^2.1.4"
+  },
+  "vitest": {
+    "setupFiles": [
+      "./test/setup.js"
+    ]
   }
 }
 

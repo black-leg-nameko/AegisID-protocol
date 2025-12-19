@@ -51,7 +51,11 @@ app.post('/verify', async (c) => {
     throw new HTTPException(401, { message: 'invalid_signature' })
   }
 
-  // Validate custom nonce/exp if carried outside JWT payload (MVP: enforce request-level)
+  // Validate nonce binding (the JWT payload must carry the same nonce)
+  if (verified?.payload?.nonce !== nonce) {
+    throw new HTTPException(422, { message: 'invalid_claims: nonce mismatch' })
+  }
+  // Validate custom exp if carried at request-level (already range-checked above)
   // You may also embed nonce/exp within the JWT and let jose validate exp automatically
   const end = Date.now()
   c.header('Server-Timing', `edge-verify;dur=${end - start}`)
