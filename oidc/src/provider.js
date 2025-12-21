@@ -127,6 +127,29 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       audit('interaction_start', { correlationId, uid, prompt: prompt && prompt.name, client_id: params && params.client_id })
       // eslint-disable-next-line no-console
       console.log('INTERACTION_DETAILS', { uid, prompt: prompt && prompt.name, params: { client_id: params && params.client_id } })
+      // Force consent flow takes precedence
+      if (forceConsent) {
+        if (ctx.req.method === 'POST') {
+          audit('interaction_consent_completed', { correlationId, uid, client_id: params && params.client_id })
+          const result = { consent: {} }
+          await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
+          return
+        } else {
+          audit('interaction_consent_page', { correlationId, uid, client_id: params && params.client_id })
+          ctx.type = 'text/html; charset=utf-8'
+          ctx.body = `
+<!doctype html>
+<html><body>
+  <h1>Consent</h1>
+  <p>Client: ${params.client_id}</p>
+  <form method="post" action="/interaction/${uid}?force_consent=1">
+    <input type="hidden" name="uid" value="${uid}" />
+    <button type="submit" name="consent" value="accept">Approve</button>
+  </form>
+</body></html>`
+          return
+        }
+      }
       if (prompt.name === 'login') {
         if (ctx.req.method === 'POST') {
           try {
@@ -151,12 +174,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
               }
             }
             audit('interaction_login_completed', { correlationId, uid, client_id: params && params.client_id })
-            if (forceConsent) {
-              ctx.status = 302
-              ctx.set('location', `/interaction/${uid}?force_consent=1`)
-            } else {
-              await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
-            }
+            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
             return
           } catch (e) {
             const err = {
@@ -188,7 +206,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         return
         }
       }
-      if (prompt.name === 'consent' || forceConsent) {
+      if (prompt.name === 'consent') {
         if (ctx.req.method === 'POST') {
           audit('interaction_consent_completed', { correlationId, uid, client_id: params && params.client_id })
           const result = { consent: {} }
