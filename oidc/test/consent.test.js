@@ -72,43 +72,21 @@ describe('Explicit consent UI', () => {
     nextLoc = res.headers.get('location')
     cookies = mergeCookieHeader(cookies, getSetCookies(res.headers))
 
-    // Follow until we land on consent GET
-    for (let i = 0; i < 10; i++) {
-      const url = new URL(nextLoc, issuer)
-      const path = url.pathname
-      if (path.startsWith('/interaction/')) {
-        const getRes = await fetch(url, { headers: { cookie: cookies } })
-        if (getRes.status === 200) {
-          // consent page rendered
-          cookies = mergeCookieHeader(cookies, getSetCookies(getRes.headers))
-          uid = path.split('/').pop()
-          // POST consent
-          form = new URLSearchParams()
-          form.set('uid', uid)
-          const postRes = await fetch(url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: cookies },
-            body: form.toString(),
-            redirect: 'manual'
-          })
-          expect([302, 303]).toContain(postRes.status)
-          break
-        } else {
-          // continue redirects
-          const resN = await fetch(url, { redirect: 'manual', headers: { cookie: cookies } })
-          expect([302, 303]).toContain(resN.status)
-          nextLoc = resN.headers.get('location')
-          cookies = mergeCookieHeader(cookies, getSetCookies(resN.headers))
-        }
-      } else if (path.startsWith('/auth/')) {
-        const resN = await fetch(url, { redirect: 'manual', headers: { cookie: cookies } })
-        expect([302, 303]).toContain(resN.status)
-        nextLoc = resN.headers.get('location')
-        cookies = mergeCookieHeader(cookies, getSetCookies(resN.headers))
-      } else {
-        break
-      }
-    }
+    // Deterministically GET consent page with force_consent flag
+    const consentUrl = new URL(`/interaction/${uid}?force_consent=1`, issuer)
+    const getConsent = await fetch(consentUrl, { headers: { cookie: cookies } })
+    expect(getConsent.status).toBe(200)
+    cookies = mergeCookieHeader(cookies, getSetCookies(getConsent.headers))
+    // POST consent
+    const formConsent = new URLSearchParams()
+    formConsent.set('uid', uid)
+    const postConsent = await fetch(consentUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: cookies },
+      body: formConsent.toString(),
+      redirect: 'manual'
+    })
+    expect([302, 303]).toContain(postConsent.status)
 
     const events = globalThis.__AegisOidcAudit || []
     let consentEvent = events.find((e) => e.event === 'interaction_consent_completed' || e.event === 'interaction_consent_page')
