@@ -104,6 +104,8 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
     if (ctx.path.startsWith('/interaction/')) {
       let details
       const correlationId = ctx.req.headers['x-correlation-id'] || ctx.req.headers['X-Correlation-Id'] || nanoid(10)
+      const reqUrl = new URL(`http://local${ctx.req.url || ctx.path}`)
+      const forceConsent = reqUrl.searchParams.get('force_consent') === '1'
       try {
         // eslint-disable-next-line no-console
         console.log('INTERACTION_REQ', { path: ctx.path, cookie: ctx.req.headers['cookie'] || ctx.req.headers['Cookie'] || '' })
@@ -149,7 +151,12 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
               }
             }
             audit('interaction_login_completed', { correlationId, uid, client_id: params && params.client_id })
-            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
+            if (forceConsent) {
+              ctx.status = 302
+              ctx.set('location', `/interaction/${uid}?force_consent=1`)
+            } else {
+              await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
+            }
             return
           } catch (e) {
             const err = {
@@ -181,7 +188,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         return
         }
       }
-      if (prompt.name === 'consent') {
+      if (prompt.name === 'consent' || forceConsent) {
         if (ctx.req.method === 'POST') {
           audit('interaction_consent_completed', { correlationId, uid, client_id: params && params.client_id })
           const result = { consent: {} }
