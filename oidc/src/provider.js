@@ -80,6 +80,25 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   }
 
   const provider = new Provider(issuer, configuration)
+  // default loginVerifier using VERIFY_URL if not provided
+  const verifyUrl = process.env.VERIFY_URL
+  const doLoginVerify = loginVerifier || (verifyUrl ? (async ({ body, params, correlationId }) => {
+    const res = await fetch(verifyUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-correlation-id': correlationId || '' },
+      body: JSON.stringify({
+        sd_jwt: body.sd_jwt,
+        did: body.did,
+        aud: body.aud || params?.client_id,
+        client_id: params?.client_id,
+        nonce: body.nonce,
+        exp: body.exp
+      })
+    })
+    if (!res.ok) throw new Error(`verify failed: ${res.status}`)
+    const json = await res.json()
+    return { accountId: json.sub, amr: json.amr }
+  }) : null)
 
   // Test-only: shortcut /auth/:uid to final redirect_uri
   provider.app.middleware.unshift(async (ctx, next) => {
@@ -157,8 +176,8 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
             // CSRF validation could be enforced here (uid echo & cookie match).
             // For MVP E2E, proceed without hard-failing if cookie is missing.
             let result
-            if (typeof loginVerifier === 'function') {
-              const verified = await loginVerifier({ body, params })
+            if (typeof doLoginVerify === 'function' && body && (body.sd_jwt && body.did)) {
+              const verified = await doLoginVerify({ body, params, correlationId })
               result = {
                 login: {
                   accountId: verified.accountId,
