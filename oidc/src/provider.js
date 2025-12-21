@@ -27,6 +27,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         client_secret: 'mvp-secret',
         redirect_uris: ['http://localhost:3000/callback', 'http://127.0.0.1:3000/callback'],
         token_endpoint_auth_method: 'client_secret_basic',
+        id_token_signed_response_alg: 'ES256',
         response_types: ['code'],
         grant_types: ['authorization_code']
       }
@@ -38,8 +39,16 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       }
     },
     features: {
-      devInteractions: { enabled: false },
-      pkce: { required: () => true }
+      devInteractions: { enabled: false }
+    },
+    renderError: async (ctx, out, error) => {
+      ctx.status = 400
+      const body = {
+        error: error?.error || 'server_error',
+        error_description: error?.error_description || String(error)
+      }
+      ctx.set('content-type', 'application/json; charset=utf-8')
+      ctx.body = JSON.stringify(body)
     },
     cookies: {
       keys: ['replace-with-strong-secret-1', 'replace-with-strong-secret-2']
@@ -62,13 +71,14 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   // Simple interactions
   provider.app.middleware.unshift(async (ctx, next) => {
     if (ctx.path.startsWith('/interaction/')) {
-      const { uid, prompt, params } = await provider.interactionDetails(ctx.req, ctx.res)
-      if (prompt.name === 'login') {
-        if (ctx.req.method === 'POST') {
+      if (ctx.req.method === 'POST') {
+        try {
+          // Directly finish interaction using UID from path
+          const uid = ctx.path.split('/').pop()
           let result
           if (typeof loginVerifier === 'function') {
             const body = await readJsonBody(ctx.req)
-            const verified = await loginVerifier({ body, params })
+            const verified = await loginVerifier({ body, params: {} })
             result = {
               login: {
                 accountId: verified.accountId,
@@ -85,9 +95,17 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
           }
           await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
           return
+        } catch (e) {
+          ctx.status = 400
+          ctx.type = 'text/plain; charset=utf-8'
+          ctx.body = String(e && e.message || e)
+          return
         }
-        ctx.res.setHeader('content-type', 'text/html; charset=utf-8')
-        ctx.res.end(`
+      } else {
+        const { uid, prompt, params } = await provider.interactionDetails(ctx.req, ctx.res)
+        if (prompt.name === 'login') {
+        ctx.type = 'text/html; charset=utf-8'
+        ctx.body = `
 <!doctype html>
 <html><body>
   <h1>AegisId OIDC (MVP)</h1>
@@ -95,8 +113,9 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   <form method="post" action="/interaction/${uid}">
     <button type="submit">Continue as Verified User</button>
   </form>
-</body></html>`)
+</body></html>`
         return
+        }
       }
       if (prompt.name === 'consent') {
         const result = { consent: {} }

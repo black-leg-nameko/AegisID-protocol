@@ -1,11 +1,11 @@
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { Timing } from 'hono/timing'
+import { timing } from 'hono/timing'
 import { jwtVerify, importJWK } from 'jose'
 import { validateVerifyRequest } from './schema.js'
 
 const app = new Hono()
-app.use('*', Timing())
+app.use('*', timing())
 
 app.get('/health', (c) => c.text('ok'))
 
