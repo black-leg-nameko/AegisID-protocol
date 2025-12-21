@@ -221,6 +221,71 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
     <input type="hidden" name="uid" value="${uid}" />
     <button type="submit">Continue as Verified User</button>
   </form>
+  <hr />
+  <h2>Client-side SD-JWT Demo (simulated)</h2>
+  <p>This demo generates a P-256 key in-browser, signs a JWT (nonce/state required), derives did:jwk, and posts JSON to login.</p>
+  <label>Nonce: <input id="nonce" value="${params.nonce || ''}" /></label>
+  <button id="btn-sdjwt">Sign & Continue</button>
+  <script>
+  async function b64url(bytes) {
+    const base64 = btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/=+$/,'').replace(/\\+/g,'-').replace(/\\//g,'_');
+    return base64;
+  }
+  async function textToBytes(s) { return new TextEncoder().encode(s); }
+  async function importKeyForSign(jwk) {
+    return await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  }
+  async function signES256(privateKey, data) {
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data);
+    // DER -> raw R|S not handled; use JOSE concat format simplification: assume WebCrypto returns raw (browser-dependent).
+    // For demo purposes we treat signature as raw and base64url it directly.
+    return new Uint8Array(sig);
+  }
+  function toDidJwk(jwkPub) {
+    const json = JSON.stringify(jwkPub);
+    const b64 = btoa(unescape(encodeURIComponent(json))).replace(/=+$/,'').replace(/\\+/g,'-').replace(/\\//g,'_');
+    return 'did:jwk:' + b64;
+  }
+  function base64urlFromJSON(obj) {
+    const json = JSON.stringify(obj);
+    return btoa(unescape(encodeURIComponent(json))).replace(/=+$/,'').replace(/\\+/g,'-').replace(/\\//g,'_');
+  }
+  document.getElementById('btn-sdjwt').addEventListener('click', async () => {
+    const nonceEl = document.getElementById('nonce');
+    const nonce = nonceEl && nonceEl.value ? nonceEl.value : ('n-' + Math.random().toString(36).slice(2));
+    const clientId = ${JSON.stringify(params.client_id)};
+    const header = { alg: 'ES256', kid: 'holder-demo' };
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 60;
+    const payload = { aud: clientId, nonce, iat: now, exp };
+    const encHeader = base64urlFromJSON(header);
+    const encPayload = base64urlFromJSON(payload);
+    const signingInput = encHeader + '.' + encPayload;
+    const digest = await crypto.subtle.digest('SHA-256', await textToBytes(signingInput));
+    const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign','verify']);
+    const jwkPub = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+    jwkPub.alg = 'ES256';
+    const jwkPriv = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+    const priv = await importKeyForSign(jwkPriv);
+    const rawSig = await signES256(priv, await textToBytes(signingInput));
+    const encSig = await b64url(rawSig);
+    const sd_jwt = signingInput + '.' + encSig;
+    const did = toDidJwk(jwkPub);
+    const body = { uid: ${JSON.stringify(uid)}, sd_jwt, did, aud: clientId, nonce, exp };
+    await fetch('/interaction/${uid}', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(r => {
+      if (r.status === 302 || r.status === 303) {
+        const loc = r.headers.get('location');
+        if (loc) location.href = loc;
+      } else {
+        r.text().then(t => alert('Login failed: ' + r.status + '\\n' + t));
+      }
+    }).catch(e => alert('Error: ' + e));
+  });
+  </script>
 </body></html>`
         return
         }
