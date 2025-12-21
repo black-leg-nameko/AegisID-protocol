@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createServer } from 'node:http'
+import { startMockRp } from './helpers/mockRp.js'
 import { createProviderServer } from '../src/provider.js'
 import workersApp from '../../workers/src/index.js'
 import { SignJWT, exportJWK, generateKeyPair, importJWK } from 'jose'
@@ -44,17 +44,7 @@ async function createToken(aud, nonce, expSec, privJwk) {
 
 beforeAll(async () => {
   // Start mock RP to accept final redirect_uri callback
-  rpServer = createServer((req, res) => {
-    if (req.method === 'GET' && req.url && req.url.startsWith('/callback')) {
-      res.statusCode = 200
-      res.setHeader('content-type', 'text/plain')
-      res.end('OK')
-      return
-    }
-    res.statusCode = 404
-    res.end('not found')
-  })
-  await new Promise((resolve) => rpServer.listen(3000, '127.0.0.1', resolve))
+  rpServer = await startMockRp({ port: 3000, host: '127.0.0.1', path: '/callback' })
 
   const prev = process.env.NODE_ENV
   process.env.NODE_ENV = 'production'
