@@ -2,11 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createProviderServer } from '../src/provider.js'
 import workersApp, { derivePairwiseSub } from '../../workers/src/index.js'
 import { SignJWT, exportJWK, generateKeyPair, importJWK } from 'jose'
+import { startMockRp } from './helpers/mockRp.js'
 
 const providerPort = 4011
 const issuer = `http://127.0.0.1:${providerPort}`
 
 let server
+let rpServer
 
 function getSetCookies(headers) {
   // undici provides headers.raw(), node-fetch has raw() too
@@ -64,6 +66,8 @@ async function createToken(aud, nonce, expSec, privJwk) {
 }
 
 beforeAll(async () => {
+  // start mock RP for final redirect_uri on a dedicated port
+  rpServer = await startMockRp({ port: 3002, host: '127.0.0.1', path: '/callback' })
   const loginVerifier = async ({ body, params }) => {
     const { sd_jwt, did, aud, client_id, nonce, exp } = body || {}
     const res = await workersApp.request('/verify', {
@@ -86,6 +90,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve))
+  await new Promise((resolve) => rpServer.close(resolve))
 })
 
 describe('E2E: OIDC login via Workers /verify', () => {
@@ -99,7 +104,7 @@ describe('E2E: OIDC login via Workers /verify', () => {
 
     const client_id = 'mvp-client'
     const aud = client_id
-    const redirect_uri = 'http://127.0.0.1:3000/callback'
+    const redirect_uri = 'http://127.0.0.1:3002/callback'
     const state = 'st-' + Math.random().toString(36).slice(2)
     const nonce = 'n-' + Math.random().toString(36).slice(2)
     const exp = Math.floor(Date.now() / 1000) + 60

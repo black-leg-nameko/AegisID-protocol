@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createProviderServer } from '../src/provider.js'
+import { startMockRp } from './helpers/mockRp.js'
 
 let server
+let rpServer
 const port = 4013
 const issuer = `http://127.0.0.1:${port}`
 
@@ -30,6 +32,8 @@ function mergeCookieHeader(existingHeader, newSetCookies) {
 }
 
 beforeAll(async () => {
+  // start mock RP on dedicated port to avoid collisions
+  rpServer = await startMockRp({ port: 3001, host: '127.0.0.1', path: '/callback' })
   const prev = process.env.NODE_ENV
   process.env.NODE_ENV = 'production'
   const created = await createProviderServer({ issuer, port })
@@ -39,12 +43,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve))
+  await new Promise((resolve) => rpServer.close(resolve))
 })
 
 describe('Production resume redirects to client redirect_uri', () => {
   it('completes login+consent and reaches redirect_uri', async () => {
     const client_id = 'mvp-client'
-    const redirect_uri = 'http://127.0.0.1:3000/callback'
+    const redirect_uri = 'http://127.0.0.1:3001/callback'
     const state = 'st-' + Math.random().toString(36).slice(2)
     const nonce = 'n-' + Math.random().toString(36).slice(2)
     const code_verifier = 'v-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)

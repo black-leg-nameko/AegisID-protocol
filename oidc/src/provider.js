@@ -64,7 +64,14 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       {
         client_id: 'mvp-client',
         client_secret: 'mvp-secret',
-        redirect_uris: ['http://localhost:3000/callback', 'http://127.0.0.1:3000/callback'],
+        redirect_uris: [
+          'http://localhost:3000/callback',
+          'http://127.0.0.1:3000/callback',
+          'http://localhost:3001/callback',
+          'http://127.0.0.1:3001/callback',
+          'http://localhost:3002/callback',
+          'http://127.0.0.1:3002/callback'
+        ],
         token_endpoint_auth_method: 'client_secret_basic',
         id_token_signed_response_alg: 'ES256',
         response_types: ['code'],
