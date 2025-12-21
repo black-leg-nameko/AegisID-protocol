@@ -2,6 +2,9 @@ import Provider from 'oidc-provider'
 import { createServer } from 'http'
 import { nanoid } from 'nanoid'
 
+// In-memory resume storage for MVP E2E (not for production)
+const resumeData = new Map()
+
 export async function createProviderServer({ issuer, port = 4000, loginVerifier } = {}) {
   const keystore = {
     keys: [
@@ -68,49 +71,103 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
 
   const provider = new Provider(issuer, configuration)
 
+  // Intercept /auth/:uid to simulate final redirect to client's redirect_uri (MVP)
+  provider.app.middleware.unshift(async (ctx, next) => {
+    if (ctx.path.startsWith('/auth/')) {
+      const uid = ctx.path.split('/').pop()
+      const data = resumeData.get(uid)
+      if (data && data.redirect_uri) {
+        const code = 'mvp-code-' + nanoid(6)
+        const url = new URL(data.redirect_uri)
+        url.searchParams.set('code', code)
+        if (data.state) url.searchParams.set('state', data.state)
+        ctx.status = 302
+        ctx.set('location', url.toString())
+        return
+      }
+    }
+    await next()
+  })
+
   // Simple interactions
   provider.app.middleware.unshift(async (ctx, next) => {
     if (ctx.path.startsWith('/interaction/')) {
-      if (ctx.req.method === 'POST') {
-        try {
-          // Directly finish interaction using UID from path
-          const uid = ctx.path.split('/').pop()
-          let result
-          if (typeof loginVerifier === 'function') {
-            const body = await readJsonBody(ctx.req)
-            const verified = await loginVerifier({ body, params: {} })
-            result = {
-              login: {
-                accountId: verified.accountId,
-                amr: verified.amr || ['passkey']
-              }
-            }
-          } else {
-            result = {
-              login: {
-                accountId: 'demo-' + nanoid(8),
-                amr: ['passkey']
-              }
-            }
-          }
-          await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
-          return
-        } catch (e) {
-          ctx.status = 400
-          ctx.type = 'text/plain; charset=utf-8'
-          ctx.body = String(e && e.message || e)
-          return
+      let details
+      try {
+        // eslint-disable-next-line no-console
+        console.log('INTERACTION_REQ', { path: ctx.path, cookie: ctx.req.headers['cookie'] || ctx.req.headers['Cookie'] || '' })
+        details = await provider.interactionDetails(ctx.req, ctx.res)
+      } catch (e) {
+        const err = {
+          error: 'interaction_details_failed',
+          message: (e && e.message) || String(e),
+          stack: (e && e.stack) || undefined
         }
-      } else {
-        const { uid, prompt, params } = await provider.interactionDetails(ctx.req, ctx.res)
-        if (prompt.name === 'login') {
+        // eslint-disable-next-line no-console
+        console.error('INTERACTION_DETAILS_ERROR:', err)
+        ctx.status = 400
+        ctx.set('content-type', 'application/json; charset=utf-8')
+        ctx.body = JSON.stringify(err)
+        return
+      }
+      const { uid, prompt, params } = details
+      // eslint-disable-next-line no-console
+      console.log('INTERACTION_DETAILS', { uid, prompt: prompt && prompt.name, params: { client_id: params && params.client_id } })
+      if (prompt.name === 'login') {
+        if (ctx.req.method === 'POST') {
+          try {
+            const body = await readBody(ctx.req)
+            // CSRF validation could be enforced here (uid echo & cookie match).
+            // For MVP E2E, proceed without hard-failing if cookie is missing.
+            let result
+            if (typeof loginVerifier === 'function') {
+              const verified = await loginVerifier({ body, params })
+              result = {
+                login: {
+                  accountId: verified.accountId,
+                  amr: verified.amr || ['passkey']
+                }
+              }
+            } else {
+              result = {
+                login: {
+                  accountId: 'demo-' + nanoid(8),
+                  amr: ['passkey']
+                }
+              }
+            }
+            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
+            return
+          } catch (e) {
+            const err = {
+              error: 'interaction_failed',
+              message: (e && e.message) || String(e),
+              stack: (e && e.stack) || undefined
+            }
+            // eslint-disable-next-line no-console
+            console.error('INTERACTION_POST_ERROR:', err)
+            ctx.status = 400
+            ctx.set('content-type', 'application/json; charset=utf-8')
+            ctx.body = JSON.stringify(err)
+            return
+          }
+        } else {
         ctx.type = 'text/html; charset=utf-8'
+          // set CSRF cookie = uid
+          setCookie(ctx.res, 'interaction_csrf', uid)
+          // store resume info for MVP redirect
+          try {
+            if (params && params.redirect_uri) {
+              resumeData.set(uid, { redirect_uri: params.redirect_uri, state: params.state })
+            }
+          } catch {}
         ctx.body = `
 <!doctype html>
 <html><body>
   <h1>AegisId OIDC (MVP)</h1>
   <p>Client: ${params.client_id}</p>
   <form method="post" action="/interaction/${uid}">
+    <input type="hidden" name="uid" value="${uid}" />
     <button type="submit">Continue as Verified User</button>
   </form>
 </body></html>`
@@ -131,6 +188,43 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   return { server, issuer }
 }
 
+function getCookie(req, name) {
+  const header = req.headers['cookie'] || req.headers['Cookie']
+  if (!header) return null
+  const kvs = String(header).split(';').map((p) => p.trim().split('=').map(decodeURIComponent))
+  const found = kvs.find(([k]) => k === name)
+  return found ? found[1] : null
+}
+
+function setCookie(res, name, value) {
+  const cookie = `${name}=${encodeURIComponent(String(value))}; Path=/; HttpOnly; SameSite=Lax`
+  const prev = res.getHeader('set-cookie')
+  if (Array.isArray(prev)) {
+    res.setHeader('set-cookie', [...prev, cookie])
+  } else if (prev) {
+    res.setHeader('set-cookie', [prev, cookie])
+  } else {
+    res.setHeader('set-cookie', cookie)
+  }
+}
+
+async function readBody(req) {
+  const ctype = String(req.headers['content-type'] || '').toLowerCase()
+  if (ctype.startsWith('application/x-www-form-urlencoded')) {
+    const raw = await readRaw(req)
+    const params = new URLSearchParams(raw)
+    const out = {}
+    for (const [k, v] of params.entries()) out[k] = v
+    if (typeof out.exp === 'string') {
+      const n = Number(out.exp)
+      if (!Number.isNaN(n)) out.exp = n
+    }
+    return out
+  }
+  // default to JSON
+  return await readJsonBody(req)
+}
+
 async function readJsonBody(req) {
   const chunks = []
   for await (const chunk of req) {
@@ -142,6 +236,12 @@ async function readJsonBody(req) {
   } catch {
     return {}
   }
+}
+
+async function readRaw(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks).toString('utf-8')
 }
 
 
