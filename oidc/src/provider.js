@@ -58,6 +58,8 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
     }
   } catch {}
 
+  const envCookieKeys = (process.env.COOKIES_KEYS || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
   const configuration = {
     issuer,
     clients: [
@@ -98,7 +100,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       ctx.body = JSON.stringify(body)
     },
     cookies: {
-      keys: ['replace-with-strong-secret-1', 'replace-with-strong-secret-2']
+      keys: envCookieKeys.length ? envCookieKeys : ['replace-with-strong-secret-1', 'replace-with-strong-secret-2']
     },
     ttl: {
       AccessToken: 60 * 10,
@@ -114,6 +116,32 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   }
 
   const provider = new Provider(issuer, configuration)
+  // /health endpoint and security headers
+  provider.app.middleware.unshift(async (ctx, next) => {
+    // security headers (best-effort)
+    ctx.set('x-frame-options', 'DENY')
+    ctx.set('x-content-type-options', 'nosniff')
+    ctx.set('referrer-policy', 'no-referrer')
+    if (issuer.startsWith('https://')) {
+      ctx.set('strict-transport-security', 'max-age=15552000; includeSubDomains')
+    }
+    if (ctx.path === '/health') {
+      const redis = getRedis()
+      const redisStatus = redis ? (redis.status || 'unknown') : 'disabled'
+      const keys = Array.isArray(jwksConfig?.keys) ? jwksConfig.keys : []
+      const activeKid = process.env.JWKS_ACTIVE_KID || null
+      const hasActive = activeKid ? !!keys.find(k => k.kid === activeKid) : true
+      const status = (keys.length > 0 && hasActive) ? 'ok' : 'degraded'
+      ctx.set('content-type', 'application/json; charset=utf-8')
+      ctx.body = JSON.stringify({
+        status,
+        jwks: { count: keys.length, activeKid, hasActive },
+        redis: { status: redisStatus }
+      })
+      return
+    }
+    await next()
+  })
   // JWKS hot reload (env/JWKS_FILE/JWKS_URL) and active kid hint logging
   async function reloadJwks() {
     try {
@@ -171,7 +199,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         ctx.set('access-control-allow-origin', origin || '*')
       }
     }
-    // naive rate limit: 60 req/min per ip
+    // rate limit: prefer Redis if available, fallback to in-memory fixed window
     const ip = ctx.req.socket?.remoteAddress || ctx.req.headers['x-forwarded-for'] || 'unknown'
     // include client_id for fairness
     const url = new URL(`http://local${ctx.req.url || ctx.path}`)
@@ -180,18 +208,48 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
     const now = Date.now()
     const windowMs = 60_000
     const max = Number(process.env.RATE_LIMIT_MAX || 120)
-    const entry = rateMap.get(key) || { count: 0, start: now }
-    if (now - entry.start > windowMs) {
-      entry.count = 0
-      entry.start = now
-    }
-    entry.count += 1
-    rateMap.set(key, entry)
-    if (entry.count > max) {
-      ctx.status = 429
-      ctx.set('retry-after', '60')
-      ctx.body = 'Too Many Requests'
-      return
+    const redis = getRedis()
+    if (redis) {
+      try {
+        const rk = `aegis:rl:${key}`
+        const n = await redis.incr(rk)
+        if (n === 1) await redis.pexpire(rk, windowMs)
+        if (n > max) {
+          ctx.status = 429
+          ctx.set('retry-after', '60')
+          ctx.body = 'Too Many Requests'
+          return
+        }
+      } catch {
+        // on redis error, fall back to local
+        const entry = rateMap.get(key) || { count: 0, start: now }
+        if (now - entry.start > windowMs) {
+          entry.count = 0
+          entry.start = now
+        }
+        entry.count += 1
+        rateMap.set(key, entry)
+        if (entry.count > max) {
+          ctx.status = 429
+          ctx.set('retry-after', '60')
+          ctx.body = 'Too Many Requests'
+          return
+        }
+      }
+    } else {
+      const entry = rateMap.get(key) || { count: 0, start: now }
+      if (now - entry.start > windowMs) {
+        entry.count = 0
+        entry.start = now
+      }
+      entry.count += 1
+      rateMap.set(key, entry)
+      if (entry.count > max) {
+        ctx.status = 429
+        ctx.set('retry-after', '60')
+        ctx.body = 'Too Many Requests'
+        return
+      }
     }
     await next()
   })
@@ -288,8 +346,16 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         if (ctx.req.method === 'POST') {
           try {
             const body = await readBody(ctx.req)
-            // CSRF validation could be enforced here (uid echo & cookie match).
-            // For MVP E2E, proceed without hard-failing if cookie is missing.
+            // Strict CSRF in production: require cookie(uid) === body.uid
+            if (process.env.NODE_ENV !== 'test') {
+              const csrfCookie = getCookie(ctx.req, 'interaction_csrf')
+              if (!csrfCookie || !body || String(body.uid) !== String(csrfCookie)) {
+                ctx.status = 400
+                ctx.set('content-type', 'application/json; charset=utf-8')
+                ctx.body = JSON.stringify({ error: 'invalid_csrf', error_description: 'CSRF token invalid or missing' })
+                return
+              }
+            }
             let result
             if (typeof doLoginVerify === 'function' && body && (body.sd_jwt && body.did)) {
               const verified = await doLoginVerify({ body, params, correlationId })

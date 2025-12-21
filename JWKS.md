@@ -8,14 +8,17 @@
 - Maintain at least two signing keys in JWKS: one active, one retiring.
 - Advertise both in `/jwks` until all relying parties have cached the new key.
 - Switch active `kid` for signing (via configuration/env) and keep old key published for a grace period (e.g., 7–14 days).
+- Set `JWKS_ACTIVE_KID` to hint the active key (provider prioritizes this kid for signing by ordering keys).
 
 3) Operational Steps
 - Generate new ES256 key pair, append to JWKS with unique `kid`.
 - Deploy JWKS with both keys. After caches warm, update the signer to use the new `kid`.
+- Send `SIGHUP` or set `JWKS_RELOAD_MS` for periodic reload; provider mutates JWKS served.
+- Check `/health` → `jwks.hasActive: true` for the active kid presence.
 - After the grace period, remove the old private key (keep public key for as long as tokens signed by it may remain valid).
 
 4) Future Enhancements
-- Implement dynamic keystore reload (hot-reload JWKS on SIGHUP or periodic refresh).
+- Implement dynamic keystore reload (hot-reload JWKS on SIGHUP or periodic refresh) and keystore hot-swap for signing without restart (library-dependent).
 - Add an admin endpoint guarded behind auth to trigger rotation (disabled by default).
 - Use a dedicated keystore library and persistent storage to avoid embedding private keys in config.
 
