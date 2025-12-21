@@ -2,6 +2,19 @@ import Provider from 'oidc-provider'
 import { createServer } from 'http'
 import { nanoid } from 'nanoid'
 
+function audit(event, data) {
+  try {
+    const record = { event, ts: Date.now(), ...data }
+    if (process.env.NODE_ENV === 'test') {
+      globalThis.__AegisOidcAudit = globalThis.__AegisOidcAudit || []
+      globalThis.__AegisOidcAudit.push(record)
+    } else {
+      // eslint-disable-next-line no-console
+      console.log('[audit]', JSON.stringify(record))
+    }
+  } catch {}
+}
+
 export async function createProviderServer({ issuer, port = 4000, loginVerifier } = {}) {
   const keystore = {
     keys: [
@@ -108,6 +121,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         return
       }
       const { uid, prompt, params } = details
+      audit('interaction_start', { uid, prompt: prompt && prompt.name, client_id: params && params.client_id })
       // eslint-disable-next-line no-console
       console.log('INTERACTION_DETAILS', { uid, prompt: prompt && prompt.name, params: { client_id: params && params.client_id } })
       if (prompt.name === 'login') {
@@ -133,6 +147,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
                 }
               }
             }
+            audit('interaction_login_completed', { uid, client_id: params && params.client_id })
             await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
             return
           } catch (e) {
@@ -166,6 +181,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         }
       }
       if (prompt.name === 'consent') {
+        audit('interaction_consent_completed', { uid, client_id: params && params.client_id })
         const result = { consent: {} }
         await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
         return

@@ -7,6 +7,18 @@ import { validateVerifyRequest } from './schema.js'
 const app = new Hono()
 app.use('*', timing())
 
+function audit(event, data) {
+  try {
+    if (process.env.NODE_ENV === 'test') {
+      globalThis.__AegisAudit = globalThis.__AegisAudit || []
+      globalThis.__AegisAudit.push({ event, ...data })
+    } else {
+      // eslint-disable-next-line no-console
+      console.log('[audit]', event, data)
+    }
+  } catch {}
+}
+
 app.get('/health', (c) => c.text('ok'))
 
 /**
@@ -19,11 +31,13 @@ app.post('/verify', async (c) => {
   try {
     payload = await c.req.json()
   } catch {
+    audit('verify_error', { reason: 'invalid_json' })
     return jsonError(c, 400, 'invalid_request', 'body must be JSON')
   }
 
   const validation = validateVerifyRequest(payload ?? {})
   if (!validation.ok) {
+    audit('verify_error', { reason: 'schema', errors: validation.errors })
     return jsonError(c, 400, 'invalid_request', 'schema validation failed', validation.errors)
   }
   const { sd_jwt, did, aud, client_id, nonce, exp } = payload
@@ -32,12 +46,14 @@ app.post('/verify', async (c) => {
   const nowSec = Math.floor(Date.now() / 1000)
   if (typeof exp !== 'number' || exp < nowSec - 5 || exp > nowSec + 300) {
     // allow small skew; restrict to ~5 minutes max
+    audit('verify_error', { reason: 'exp_out_of_range' })
     return jsonError(c, 422, 'invalid_claims', 'exp out of range')
   }
 
   // did:jwk:<b64url of jwk json>
   const jwk = parseDidJwk(did)
   if (!jwk) {
+    audit('verify_error', { reason: 'invalid_did' })
     return jsonError(c, 400, 'invalid_request', 'did is not did:jwk')
   }
 
@@ -50,15 +66,18 @@ app.post('/verify', async (c) => {
       // note: jose will also verify exp/nbf if present in the JWS payload
     })
   } catch (e) {
+    audit('verify_error', { reason: 'invalid_signature' })
     return jsonError(c, 401, 'invalid_signature', 'signature or audience invalid')
   }
 
   // Validate nonce binding (the JWT payload must carry the same nonce)
   if (verified?.payload?.nonce !== nonce) {
+    audit('verify_error', { reason: 'nonce_mismatch' })
     return jsonError(c, 422, 'invalid_claims', 'nonce mismatch')
   }
   // Enforce audience matches client_id for pairwise subject derivation context
   if (aud !== client_id) {
+    audit('verify_error', { reason: 'aud_client_id_mismatch' })
     return jsonError(c, 422, 'invalid_claims', 'aud must equal client_id')
   }
   // Validate custom exp if carried at request-level (already range-checked above)
@@ -69,6 +88,7 @@ app.post('/verify', async (c) => {
   // Derive a pairwise subject using HKDF with client_id as info
   const sub = await derivePairwiseSub(did, client_id)
 
+  audit('verify_success', { sub, client_id, aud })
   return c.json({
     ok: true,
     sub,
