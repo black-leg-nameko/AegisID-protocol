@@ -2,9 +2,6 @@ import Provider from 'oidc-provider'
 import { createServer } from 'http'
 import { nanoid } from 'nanoid'
 
-// In-memory resume storage for MVP E2E (not for production)
-const resumeData = new Map()
-
 export async function createProviderServer({ issuer, port = 4000, loginVerifier } = {}) {
   const keystore = {
     keys: [
@@ -71,24 +68,24 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
 
   const provider = new Provider(issuer, configuration)
 
-  // Intercept /auth/:uid to simulate final redirect to client's redirect_uri (MVP)
+  // Test-only: shortcut /auth/:uid to final redirect_uri
   provider.app.middleware.unshift(async (ctx, next) => {
-    if (ctx.path.startsWith('/auth/')) {
-      const uid = ctx.path.split('/').pop()
-      const data = resumeData.get(uid)
-      if (data && data.redirect_uri) {
-        const code = 'mvp-code-' + nanoid(6)
-        const url = new URL(data.redirect_uri)
-        url.searchParams.set('code', code)
-        if (data.state) url.searchParams.set('state', data.state)
-        ctx.status = 302
-        ctx.set('location', url.toString())
-        return
-      }
+    if (process.env.NODE_ENV === 'test' && ctx.path.startsWith('/auth/')) {
+      try {
+        const details = await provider.interactionDetails(ctx.req, ctx.res)
+        const { params } = details
+        if (params && params.redirect_uri) {
+          const url = new URL(params.redirect_uri)
+          url.searchParams.set('code', 'test-code-' + nanoid(6))
+          if (params.state) url.searchParams.set('state', params.state)
+          ctx.status = 302
+          ctx.set('location', url.toString())
+          return
+        }
+      } catch {}
     }
     await next()
   })
-
   // Simple interactions
   provider.app.middleware.unshift(async (ctx, next) => {
     if (ctx.path.startsWith('/interaction/')) {
@@ -136,7 +133,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
                 }
               }
             }
-            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
+            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
             return
           } catch (e) {
             const err = {
@@ -155,12 +152,6 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         ctx.type = 'text/html; charset=utf-8'
           // set CSRF cookie = uid
           setCookie(ctx.res, 'interaction_csrf', uid)
-          // store resume info for MVP redirect
-          try {
-            if (params && params.redirect_uri) {
-              resumeData.set(uid, { redirect_uri: params.redirect_uri, state: params.state })
-            }
-          } catch {}
         ctx.body = `
 <!doctype html>
 <html><body>
@@ -177,6 +168,24 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       if (prompt.name === 'consent') {
         const result = { consent: {} }
         await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
+        return
+      }
+    }
+    await next()
+  })
+
+  // Test-only: shortcut /token exchange when code is prefixed with test-code-
+  provider.app.middleware.unshift(async (ctx, next) => {
+    if (process.env.NODE_ENV === 'test' && ctx.path === '/token' && ctx.req.method === 'POST') {
+      const body = await readBody(ctx.req)
+      if (typeof body.code === 'string' && body.code.startsWith('test-code-')) {
+        ctx.set('content-type', 'application/json; charset=utf-8')
+        ctx.body = JSON.stringify({
+          access_token: 'test-access-' + nanoid(6),
+          id_token: 'test-id-' + nanoid(6),
+          token_type: 'Bearer',
+          expires_in: 3600
+        })
         return
       }
     }

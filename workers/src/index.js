@@ -57,6 +57,10 @@ app.post('/verify', async (c) => {
   if (verified?.payload?.nonce !== nonce) {
     return jsonError(c, 422, 'invalid_claims', 'nonce mismatch')
   }
+  // Enforce audience matches client_id for pairwise subject derivation context
+  if (aud !== client_id) {
+    return jsonError(c, 422, 'invalid_claims', 'aud must equal client_id')
+  }
   // Validate custom exp if carried at request-level (already range-checked above)
   // You may also embed nonce/exp within the JWT and let jose validate exp automatically
   const end = Date.now()

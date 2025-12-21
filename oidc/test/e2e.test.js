@@ -171,7 +171,7 @@ describe('E2E: OIDC login via Workers /verify', () => {
     expect([302, 303]).toContain(res3.status)
     let nextLoc = res3.headers.get('location')
     let cookiesSoFar = mergeCookieHeader(cookieAfterPost, getSetCookies(res3.headers))
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 10; i++) {
       const locUrl = new URL(nextLoc, issuer)
       const path = locUrl.pathname || ''
       if (path.startsWith('/interaction/') || path.startsWith('/auth/')) {

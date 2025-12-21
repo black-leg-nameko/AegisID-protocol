@@ -103,7 +103,7 @@ describe('/verify', () => {
     expect(body.error).toBe('invalid_claims')
   })
 
-  it('401 when audience mismatches', async () => {
+  it('401 when audience mismatches JWT expected audience', async () => {
     const { publicKey, privateKey } = await generateKeyPair('ES256')
     const pubJwk = await exportJWK(publicKey)
     pubJwk.alg = 'ES256'
@@ -122,6 +122,28 @@ describe('/verify', () => {
     expect(res.status).toBe(401)
     const body = await res.json()
     expect(body.error).toBe('invalid_signature')
+  })
+
+  it('422 when aud does not equal client_id', async () => {
+    const { publicKey, privateKey } = await generateKeyPair('ES256')
+    const pubJwk = await exportJWK(publicKey)
+    pubJwk.alg = 'ES256'
+    const privJwk = await exportJWK(privateKey)
+    const did = didFromPublicJwk(pubJwk)
+    const aud = 'some-other-client'
+    const nonce = 'n-' + Math.random().toString(36).slice(2)
+    const exp = Math.floor(Date.now() / 1000) + 60
+    const sd_jwt = await createToken(aud, nonce, exp, privJwk)
+
+    const res = await app.request('/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sd_jwt, did, aud, client_id: 'mvp-client', nonce, exp })
+    })
+    expect(res.status).toBe(422)
+    const body = await res.json()
+    expect(body.error).toBe('invalid_claims')
+    expect(body.message).toBe('aud must equal client_id')
   })
 
   it('400 when wrong types are provided', async () => {
