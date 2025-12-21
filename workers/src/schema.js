@@ -9,9 +9,9 @@ export const verifyRequestSchema = {
   properties: {
     sd_jwt: { type: 'string', minLength: 1 },
     did: { type: 'string', pattern: '^did:jwk:' },
-    aud: { type: 'string', minLength: 1 },
-    client_id: { type: 'string', minLength: 1 },
-    nonce: { type: 'string', minLength: 1 },
+    aud: { type: 'string', minLength: 3, maxLength: 128, pattern: '^[A-Za-z0-9._-]+$' },
+    client_id: { type: 'string', minLength: 3, maxLength: 128, pattern: '^[A-Za-z0-9._-]+$' },
+    nonce: { type: 'string', minLength: 8, maxLength: 256 },
     exp: { type: 'number' }
   }
 }
