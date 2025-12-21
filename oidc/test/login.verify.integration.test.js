@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createServer } from 'node:http'
 import { createProviderServer } from '../src/provider.js'
 import workersApp from '../../workers/src/index.js'
 import { SignJWT, exportJWK, generateKeyPair, importJWK } from 'jose'
 
 let server
+let rpServer
 const port = 4017
 const issuer = `http://127.0.0.1:${port}`
 
@@ -41,6 +43,19 @@ async function createToken(aud, nonce, expSec, privJwk) {
 }
 
 beforeAll(async () => {
+  // Start mock RP to accept final redirect_uri callback
+  rpServer = createServer((req, res) => {
+    if (req.method === 'GET' && req.url && req.url.startsWith('/callback')) {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/plain')
+      res.end('OK')
+      return
+    }
+    res.statusCode = 404
+    res.end('not found')
+  })
+  await new Promise((resolve) => rpServer.listen(3000, '127.0.0.1', resolve))
+
   const prev = process.env.NODE_ENV
   process.env.NODE_ENV = 'production'
   const loginVerifier = async ({ body, params }) => {
@@ -67,6 +82,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve))
+  await new Promise((resolve) => rpServer.close(resolve))
 })
 
 describe('OIDC login integration with Workers /verify', () => {
@@ -92,8 +108,11 @@ describe('OIDC login integration with Workers /verify', () => {
     let cookies = mergeCookieHeader('', getSetCookies(res1.headers))
 
     // ensure we are at interaction path; follow redirects if needed
-    for (let i = 0; i < 5 && !new URL(nextLoc, issuer).pathname.startsWith('/interaction/'); i++) {
-      const resN = await fetch(new URL(nextLoc, issuer), { redirect: 'manual', headers: { cookie: cookies } })
+    for (let i = 0; i < 5; i++) {
+      const abs = new URL(nextLoc, issuer)
+      if (abs.origin !== new URL(issuer).origin) break
+      if (abs.pathname.startsWith('/interaction/')) break
+      const resN = await fetch(abs, { redirect: 'manual', headers: { cookie: cookies } })
       expect([302, 303]).toContain(resN.status)
       nextLoc = resN.headers.get('location')
       cookies = mergeCookieHeader(cookies, getSetCookies(resN.headers))
