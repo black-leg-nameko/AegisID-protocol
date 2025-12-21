@@ -103,6 +103,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   provider.app.middleware.unshift(async (ctx, next) => {
     if (ctx.path.startsWith('/interaction/')) {
       let details
+      const correlationId = ctx.req.headers['x-correlation-id'] || ctx.req.headers['X-Correlation-Id'] || nanoid(10)
       try {
         // eslint-disable-next-line no-console
         console.log('INTERACTION_REQ', { path: ctx.path, cookie: ctx.req.headers['cookie'] || ctx.req.headers['Cookie'] || '' })
@@ -121,7 +122,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         return
       }
       const { uid, prompt, params } = details
-      audit('interaction_start', { uid, prompt: prompt && prompt.name, client_id: params && params.client_id })
+      audit('interaction_start', { correlationId, uid, prompt: prompt && prompt.name, client_id: params && params.client_id })
       // eslint-disable-next-line no-console
       console.log('INTERACTION_DETAILS', { uid, prompt: prompt && prompt.name, params: { client_id: params && params.client_id } })
       if (prompt.name === 'login') {
@@ -147,8 +148,8 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
                 }
               }
             }
-            audit('interaction_login_completed', { uid, client_id: params && params.client_id })
-            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
+            audit('interaction_login_completed', { correlationId, uid, client_id: params && params.client_id })
+            await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
             return
           } catch (e) {
             const err = {
@@ -181,10 +182,25 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         }
       }
       if (prompt.name === 'consent') {
-        audit('interaction_consent_completed', { uid, client_id: params && params.client_id })
-        const result = { consent: {} }
-        await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
-        return
+        if (ctx.req.method === 'POST') {
+          audit('interaction_consent_completed', { correlationId, uid, client_id: params && params.client_id })
+          const result = { consent: {} }
+          await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: true })
+          return
+        } else {
+          audit('interaction_consent_page', { correlationId, uid, client_id: params && params.client_id })
+          ctx.type = 'text/html; charset=utf-8'
+          ctx.body = `
+<!doctype html>
+<html><body>
+  <h1>Consent</h1>
+  <p>Client: ${params.client_id}</p>
+  <form method="post" action="/interaction/${uid}">
+    <button type="submit" name="consent" value="accept">Approve</button>
+  </form>
+</body></html>`
+          return
+        }
       }
     }
     await next()
