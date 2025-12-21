@@ -7,6 +7,28 @@ import { validateVerifyRequest } from './schema.js'
 const app = new Hono()
 app.use('*', timing())
 
+// Simple in-memory nonce replay cache (production should use KV/DO)
+const __nonceCache = globalThis.__AegisNonceCache || new Map()
+globalThis.__AegisNonceCache = __nonceCache
+function nonceCacheHas(key, nowMs) {
+  const rec = __nonceCache.get(key)
+  if (!rec) return false
+  if (nowMs - rec.ts > rec.ttlMs) {
+    __nonceCache.delete(key)
+    return false
+  }
+  return true
+}
+function nonceCacheSet(key, nowMs, ttlMs) {
+  __nonceCache.set(key, { ts: nowMs, ttlMs })
+  // opportunistic sweep to prevent unbounded growth
+  if (__nonceCache.size > 5000) {
+    for (const [k, v] of __nonceCache.entries()) {
+      if (nowMs - v.ts > v.ttlMs) __nonceCache.delete(k)
+    }
+  }
+}
+
 function audit(event, data) {
   try {
     if (process.env.NODE_ENV === 'test') {
@@ -54,6 +76,15 @@ app.post('/verify', async (c) => {
     return jsonError(c, 422, 'invalid_claims', 'exp out of range')
   }
 
+  // Replay protection: nonce must be unused within window
+  const replayKey = `${client_id}:${nonce}`
+  const nowMs = Date.now()
+  const ttlMs = 5 * 60 * 1000
+  if (process.env.NODE_ENV !== 'test' && nonceCacheHas(replayKey, nowMs)) {
+    audit('verify_error', { reason: 'replay_detected', correlationId })
+    return jsonError(c, 409, 'replay_detected', 'nonce already used')
+  }
+
   // did:jwk:<b64url of jwk json>
   const jwk = parseDidJwk(did)
   if (!jwk) {
@@ -93,6 +124,10 @@ app.post('/verify', async (c) => {
   const sub = await derivePairwiseSub(did, client_id)
 
   audit('verify_success', { correlationId, sub, client_id, aud })
+  // Mark nonce as used only after successful verification
+  if (process.env.NODE_ENV !== 'test') {
+    nonceCacheSet(replayKey, nowMs, ttlMs)
+  }
   return c.json({
     ok: true,
     sub,

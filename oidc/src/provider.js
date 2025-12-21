@@ -35,7 +35,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
     ]
   }
 
-  // Build JWKS (supports ENV JWKS override)
+  // Build signing JWKS (supports KMS-like ENV/FILE/URL overrides)
   let jwksConfig = {
     keys: [
       {
@@ -51,6 +51,20 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       }
     ]
   }
+  try {
+    let loaded = null
+    if (process.env.SIGNING_JWKS) {
+      loaded = JSON.parse(process.env.SIGNING_JWKS)
+    } else if (process.env.SIGNING_JWKS_FILE) {
+      const { readFile } = await import('fs/promises')
+      const data = await readFile(process.env.SIGNING_JWKS_FILE, 'utf-8')
+      loaded = JSON.parse(data)
+    } else if (process.env.SIGNING_JWKS_URL) {
+      const res = await fetch(process.env.SIGNING_JWKS_URL)
+      if (res.ok) loaded = await res.json()
+    }
+    if (loaded?.keys?.length) jwksConfig = loaded
+  } catch {}
   try {
     if (process.env.JWKS) {
       const parsed = JSON.parse(process.env.JWKS)
