@@ -2,7 +2,7 @@ import Provider from 'oidc-provider'
 import { createServer } from 'http'
 import { nanoid } from 'nanoid'
 
-export async function createProviderServer({ issuer, port = 4000 }) {
+export async function createProviderServer({ issuer, port = 4000, loginVerifier } = {}) {
   const keystore = {
     keys: [
       {
@@ -65,10 +65,22 @@ export async function createProviderServer({ issuer, port = 4000 }) {
       const { uid, prompt, params } = await provider.interactionDetails(ctx.req, ctx.res)
       if (prompt.name === 'login') {
         if (ctx.req.method === 'POST') {
-          const result = {
-            login: {
-              accountId: 'demo-' + nanoid(8),
-              amr: ['passkey']
+          let result
+          if (typeof loginVerifier === 'function') {
+            const body = await readJsonBody(ctx.req)
+            const verified = await loginVerifier({ body, params })
+            result = {
+              login: {
+                accountId: verified.accountId,
+                amr: verified.amr || ['passkey']
+              }
+            }
+          } else {
+            result = {
+              login: {
+                accountId: 'demo-' + nanoid(8),
+                amr: ['passkey']
+              }
             }
           }
           await provider.interactionFinished(ctx.req, ctx.res, result, { mergeWithLastSubmission: false })
@@ -98,6 +110,19 @@ export async function createProviderServer({ issuer, port = 4000 }) {
   const server = createServer(provider.callback())
   await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
   return { server, issuer }
+}
+
+async function readJsonBody(req) {
+  const chunks = []
+  for await (const chunk of req) {
+    chunks.push(Buffer.from(chunk))
+  }
+  const raw = Buffer.concat(chunks).toString('utf-8') || '{}'
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
 }
 
 

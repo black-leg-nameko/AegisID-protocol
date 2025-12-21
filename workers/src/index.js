@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { Timing } from 'hono/timing'
 import { jwtVerify, importJWK } from 'jose'
+import { validateVerifyRequest } from './schema.js'
 
 const app = new Hono()
 app.use('*', Timing())
@@ -18,25 +19,26 @@ app.post('/verify', async (c) => {
   try {
     payload = await c.req.json()
   } catch {
-    throw new HTTPException(400, { message: 'invalid_request: body must be JSON' })
+    return jsonError(c, 400, 'invalid_request', 'body must be JSON')
   }
 
-  const { sd_jwt, did, aud, nonce, exp } = payload ?? {}
-  if (!sd_jwt || !did || !aud || !nonce || !exp) {
-    throw new HTTPException(400, { message: 'invalid_request: missing required fields' })
+  const validation = validateVerifyRequest(payload ?? {})
+  if (!validation.ok) {
+    return jsonError(c, 400, 'invalid_request', 'schema validation failed', validation.errors)
   }
+  const { sd_jwt, did, aud, client_id, nonce, exp } = payload
 
   // Check time window (short lived)
   const nowSec = Math.floor(Date.now() / 1000)
   if (typeof exp !== 'number' || exp < nowSec - 5 || exp > nowSec + 300) {
     // allow small skew; restrict to ~5 minutes max
-    throw new HTTPException(422, { message: 'invalid_claims: exp out of range' })
+    return jsonError(c, 422, 'invalid_claims', 'exp out of range')
   }
 
   // did:jwk:<b64url of jwk json>
   const jwk = parseDidJwk(did)
   if (!jwk) {
-    throw new HTTPException(400, { message: 'invalid_request: did is not did:jwk' })
+    return jsonError(c, 400, 'invalid_request', 'did is not did:jwk')
   }
 
   // Verify JWS with JWK
@@ -48,20 +50,20 @@ app.post('/verify', async (c) => {
       // note: jose will also verify exp/nbf if present in the JWS payload
     })
   } catch (e) {
-    throw new HTTPException(401, { message: 'invalid_signature' })
+    return jsonError(c, 401, 'invalid_signature', 'signature or audience invalid')
   }
 
   // Validate nonce binding (the JWT payload must carry the same nonce)
   if (verified?.payload?.nonce !== nonce) {
-    throw new HTTPException(422, { message: 'invalid_claims: nonce mismatch' })
+    return jsonError(c, 422, 'invalid_claims', 'nonce mismatch')
   }
   // Validate custom exp if carried at request-level (already range-checked above)
   // You may also embed nonce/exp within the JWT and let jose validate exp automatically
   const end = Date.now()
   c.header('Server-Timing', `edge-verify;dur=${end - start}`)
 
-  // Derive a stable subject from DID (pairwise derivation is recommended in production)
-  const sub = await sha256B64Url(did)
+  // Derive a pairwise subject using HKDF with client_id as info
+  const sub = await derivePairwiseSub(did, client_id)
 
   return c.json({
     ok: true,
@@ -71,6 +73,12 @@ app.post('/verify', async (c) => {
     exp
   })
 })
+
+function jsonError(c, status, code, message, errors) {
+  const body = { ok: false, error: code, message }
+  if (errors) body.errors = errors
+  return c.json(body, status)
+}
 
 function parseDidJwk(did) {
   // did:jwk:<b64url-encoded JWK JSON>
@@ -91,6 +99,15 @@ async function sha256B64Url(input) {
   const data = new TextEncoder().encode(input)
   const digest = await crypto.subtle.digest('SHA-256', data)
   return bytesToB64Url(new Uint8Array(digest))
+}
+
+export async function derivePairwiseSub(did, clientId) {
+  const salt = new TextEncoder().encode('aegisid-sub-v1')
+  const info = new TextEncoder().encode(String(clientId))
+  const ikm = new TextEncoder().encode(String(did))
+  const key = await crypto.subtle.importKey('raw', ikm, { name: 'HKDF' }, false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, 256)
+  return bytesToB64Url(new Uint8Array(bits))
 }
 
 function b64urlToBytes(b64url) {
