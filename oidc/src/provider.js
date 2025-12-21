@@ -1,6 +1,7 @@
 import Provider from 'oidc-provider'
 import { createServer } from 'http'
 import { nanoid } from 'nanoid'
+import MemoryAdapter from './adapter.js'
 
 function audit(event, data) {
   try {
@@ -32,6 +33,29 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
     ]
   }
 
+  // Build JWKS (supports ENV JWKS override)
+  let jwksConfig = {
+    keys: [
+      {
+        kty: 'EC',
+        crv: 'P-256',
+        // demo key only, generated for MVP; replace in production
+        d: '8rVPaIfsCw0cvt9h9xVQ1CzCx-6tq1Jv7oW2YqD1S28',
+        x: 'z3VYZeaC1geFxmL90W7Qs9QzATpBxyXbAPQ0kQmVxdw',
+        y: 'iIKMlVg0-r6x8S8U8d2M8NsQpeH1wHrv3h7C2s28s_I',
+        alg: 'ES256',
+        use: 'sig',
+        kid: 'mvp-1'
+      }
+    ]
+  }
+  try {
+    if (process.env.JWKS) {
+      const parsed = JSON.parse(process.env.JWKS)
+      if (parsed?.keys?.length) jwksConfig = parsed
+    }
+  } catch {}
+
   const configuration = {
     issuer,
     clients: [
@@ -45,7 +69,8 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
         grant_types: ['authorization_code']
       }
     ],
-    jwks: keystore,
+    jwks: jwksConfig,
+    adapter: MemoryAdapter,
     interactions: {
       url(ctx, interaction) {
         return `/interaction/${interaction.uid}`
@@ -80,6 +105,40 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   }
 
   const provider = new Provider(issuer, configuration)
+  // Basic CORS + rate limiting middleware (dev use)
+  const rateMap = new Map()
+  provider.app.middleware.unshift(async (ctx, next) => {
+    // CORS for discovery/JWKS (GET, OPTIONS)
+    if (ctx.method === 'OPTIONS') {
+      ctx.set('access-control-allow-origin', '*')
+      ctx.set('access-control-allow-headers', 'content-type, x-correlation-id')
+      ctx.set('access-control-allow-methods', 'GET,POST,OPTIONS')
+      ctx.status = 204
+      return
+    }
+    if (ctx.method === 'GET' && (ctx.path.includes('.well-known') || ctx.path.includes('/jwks'))) {
+      ctx.set('access-control-allow-origin', '*')
+    }
+    // naive rate limit: 60 req/min per ip
+    const ip = ctx.req.socket?.remoteAddress || ctx.req.headers['x-forwarded-for'] || 'unknown'
+    const now = Date.now()
+    const windowMs = 60_000
+    const max = 120
+    const entry = rateMap.get(ip) || { count: 0, start: now }
+    if (now - entry.start > windowMs) {
+      entry.count = 0
+      entry.start = now
+    }
+    entry.count += 1
+    rateMap.set(ip, entry)
+    if (entry.count > max) {
+      ctx.status = 429
+      ctx.set('retry-after', '60')
+      ctx.body = 'Too Many Requests'
+      return
+    }
+    await next()
+  })
   // default loginVerifier using VERIFY_URL if not provided
   const verifyUrl = process.env.VERIFY_URL
   const doLoginVerify = loginVerifier || (verifyUrl ? (async ({ body, params, correlationId }) => {
