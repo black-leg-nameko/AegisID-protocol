@@ -7,6 +7,10 @@ import { validateVerifyRequest } from './schema.js'
 const app = new Hono()
 app.use('*', timing())
 
+// Configurable clock skew and token max age
+const pastSkewSec = Number(process.env.VERIFY_PAST_SKEW_SEC || 5)
+const futureMaxAgeSec = Number(process.env.VERIFY_FUTURE_MAX_SEC || 300)
+
 // Simple in-memory nonce replay cache (production should use KV/DO)
 const __nonceCache = globalThis.__AegisNonceCache || new Map()
 globalThis.__AegisNonceCache = __nonceCache
@@ -27,6 +31,22 @@ function nonceCacheSet(key, nowMs, ttlMs) {
       if (nowMs - v.ts > v.ttlMs) __nonceCache.delete(k)
     }
   }
+}
+
+async function verifySdJwtWithLibOrJose(sd_jwt, jwk, aud) {
+  // Attempt to use an sd-jwt library if available; fallback to JOSE jwtVerify
+  try {
+    if (process.env.USE_SD_JWT_LIB === '1') {
+      // dynamic import placeholder; real library integration can be wired here
+      // const { verify } = await import('sd-jwt-lib')
+      // const res = await verify(sd_jwt, { jwk, audience: aud })
+      // return { payload: res.payload }
+      // Fallback to JOSE if library not present
+    }
+  } catch {}
+  const key = await importJWK(jwk, jwk.alg || undefined)
+  const { payload } = await jwtVerify(sd_jwt, key, { audience: aud })
+  return { payload }
 }
 
 function audit(event, data) {
@@ -70,7 +90,7 @@ app.post('/verify', async (c) => {
 
   // Check time window (short lived)
   const nowSec = Math.floor(Date.now() / 1000)
-  if (typeof exp !== 'number' || exp < nowSec - 5 || exp > nowSec + 300) {
+  if (typeof exp !== 'number' || exp < nowSec - pastSkewSec || exp > nowSec + futureMaxAgeSec) {
     // allow small skew; restrict to ~5 minutes max
     audit('verify_error', { reason: 'exp_out_of_range', correlationId })
     return jsonError(c, 422, 'invalid_claims', 'exp out of range')
@@ -95,11 +115,7 @@ app.post('/verify', async (c) => {
   // Verify JWS with JWK
   let verified
   try {
-    const key = await importJWK(jwk, jwk.alg || undefined)
-    verified = await jwtVerify(sd_jwt, key, {
-      audience: aud
-      // note: jose will also verify exp/nbf if present in the JWS payload
-    })
+    verified = await verifySdJwtWithLibOrJose(sd_jwt, jwk, aud)
   } catch (e) {
     audit('verify_error', { reason: 'invalid_signature', correlationId })
     return jsonError(c, 401, 'invalid_signature', 'signature or audience invalid')
