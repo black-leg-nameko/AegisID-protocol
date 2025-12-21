@@ -2,6 +2,8 @@ import Provider from 'oidc-provider'
 import { createServer } from 'http'
 import { nanoid } from 'nanoid'
 import MemoryAdapter from './adapter.js'
+import RedisAdapter from './redisAdapter.js'
+import { getRedis } from './redisClient.js'
 
 function audit(event, data) {
   try {
@@ -70,7 +72,7 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
       }
     ],
     jwks: jwksConfig,
-    adapter: MemoryAdapter,
+    adapter: process.env.REDIS_URL ? RedisAdapter : MemoryAdapter,
     interactions: {
       url(ctx, interaction) {
         return `/interaction/${interaction.uid}`
@@ -105,32 +107,79 @@ export async function createProviderServer({ issuer, port = 4000, loginVerifier 
   }
 
   const provider = new Provider(issuer, configuration)
-  // Basic CORS + rate limiting middleware (dev use)
+  // JWKS hot reload (env/JWKS_FILE/JWKS_URL) and active kid hint logging
+  async function reloadJwks() {
+    try {
+      let src = null
+      if (process.env.JWKS) {
+        src = JSON.parse(process.env.JWKS)
+      } else if (process.env.JWKS_FILE) {
+        const { readFile } = await import('fs/promises')
+        const data = await readFile(process.env.JWKS_FILE, 'utf-8')
+        src = JSON.parse(data)
+      } else if (process.env.JWKS_URL) {
+        const res = await fetch(process.env.JWKS_URL)
+        if (res.ok) src = await res.json()
+      }
+      const activeKid = process.env.JWKS_ACTIVE_KID
+      if (src?.keys?.length) {
+        // mutate config so JWKS endpoint reflects latest keys
+        jwksConfig.keys = src.keys
+        if (activeKid) {
+          // move activeKid to the front to hint preferred signing key ordering
+          jwksConfig.keys.sort((a, b) => (a.kid === activeKid ? -1 : b.kid === activeKid ? 1 : 0))
+        }
+        // eslint-disable-next-line no-console
+        console.log('[jwks] reloaded', { count: src.keys.length, activeKid })
+        // Note: Rebinding signing keys at runtime is library-specific; here we log and rely on restart for signing key swap.
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[jwks] reload failed', e.message)
+    }
+  }
+  if (process.env.JWKS_RELOAD_MS) {
+    const ms = Number(process.env.JWKS_RELOAD_MS) || 60000
+    setInterval(reloadJwks, ms).unref()
+  }
+  process.on?.('SIGHUP', reloadJwks)
+  // CORS + rate limiting (production-friendly)
   const rateMap = new Map()
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean)
   provider.app.middleware.unshift(async (ctx, next) => {
     // CORS for discovery/JWKS (GET, OPTIONS)
     if (ctx.method === 'OPTIONS') {
-      ctx.set('access-control-allow-origin', '*')
+      const origin = ctx.req.headers['origin']
+      if (!allowedOrigins.length || (origin && allowedOrigins.includes(origin))) {
+        ctx.set('access-control-allow-origin', origin || '*')
+      }
       ctx.set('access-control-allow-headers', 'content-type, x-correlation-id')
       ctx.set('access-control-allow-methods', 'GET,POST,OPTIONS')
       ctx.status = 204
       return
     }
     if (ctx.method === 'GET' && (ctx.path.includes('.well-known') || ctx.path.includes('/jwks'))) {
-      ctx.set('access-control-allow-origin', '*')
+      const origin = ctx.req.headers['origin']
+      if (!allowedOrigins.length || (origin && allowedOrigins.includes(origin))) {
+        ctx.set('access-control-allow-origin', origin || '*')
+      }
     }
     // naive rate limit: 60 req/min per ip
     const ip = ctx.req.socket?.remoteAddress || ctx.req.headers['x-forwarded-for'] || 'unknown'
+    // include client_id for fairness
+    const url = new URL(`http://local${ctx.req.url || ctx.path}`)
+    const clientId = url.searchParams.get('client_id') || 'na'
+    const key = `${ip}:${clientId}`
     const now = Date.now()
     const windowMs = 60_000
-    const max = 120
-    const entry = rateMap.get(ip) || { count: 0, start: now }
+    const max = Number(process.env.RATE_LIMIT_MAX || 120)
+    const entry = rateMap.get(key) || { count: 0, start: now }
     if (now - entry.start > windowMs) {
       entry.count = 0
       entry.start = now
     }
     entry.count += 1
-    rateMap.set(ip, entry)
+    rateMap.set(key, entry)
     if (entry.count > max) {
       ctx.status = 429
       ctx.set('retry-after', '60')
