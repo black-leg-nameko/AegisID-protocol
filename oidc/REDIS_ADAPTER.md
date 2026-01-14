@@ -1,4 +1,4 @@
-# Redis Adapter Schema (AegisId OIDC)
+# Redis Adapter Schema (Aegis ID OIDC)
 
 Runtime: ioredis (enabled when `REDIS_URL` is present).
 
